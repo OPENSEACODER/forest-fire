@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VanSuraksha — Forest Fire Risk Intelligence</title>
+
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          forest:  { 950:"#050d07", 900:"#0a1a0e", 800:"#0f2614", 700:"#163320", 600:"#1e4429", 500:"#276036" },
+          ember:   { 500:"#f97316", 400:"#fb923c" },
+          risk: {
+            minimal: "#22c55e",
+            low:     "#84cc16",
+            moderate:"#f59e0b",
+            high:    "#ef4444",
+            extreme: "#991b1b",
+          }
+        },
+        fontFamily: {
+          display: ["'Syne'", "sans-serif"],
+          body:    ["'Inter'", "sans-serif"],
+        },
+      }
+    }
+  }
+</script>
+
+<!-- Leaflet -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- Chart.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+
+<!-- Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+
+<style>
+  /* Leaflet overrides for dark theme */
+  .leaflet-container            { background:#050d07 !important; font-family:'Inter',sans-serif; }
+  .leaflet-control-zoom a       { background:#0f2614 !important; color:#4ade80 !important; border-color:#1e4429 !important; }
+  .leaflet-control-zoom a:hover { background:#163320 !important; }
+  .leaflet-popup-content-wrapper{ background:#0a1a0e !important; border:1px solid #1e4429 !important; border-radius:12px !important; color:#d1fae5 !important; box-shadow:0 20px 40px rgba(0,0,0,.6) !important; }
+  .leaflet-popup-tip            { background:#0a1a0e !important; }
+  .leaflet-popup-content        { margin:12px 16px !important; }
+  .leaflet-tooltip               { background:#0a1a0e; border:1px solid #1e4429; color:#86efac; font-size:11px; }
+  /* Scrollbar */
+  ::-webkit-scrollbar            { width:4px; height:4px; }
+  ::-webkit-scrollbar-track      { background:transparent; }
+  ::-webkit-scrollbar-thumb      { background:#163320; border-radius:2px; }
+  /* Tab active indicator */
+  .tab-active { color:#4ade80 !important; border-bottom:2px solid #4ade80; }
+  /* Risk gauge */
+  .gauge-fill { transition: stroke-dashoffset 0.8s cubic-bezier(.22,1,.36,1); }
+  /* Pulse animation for extreme risk */
+  @keyframes pulse-ring { 0%,100%{opacity:.6;transform:scale(1)} 50%{opacity:.2;transform:scale(1.4)} }
+  .pulse-extreme { animation: pulse-ring 1.5s ease-in-out infinite; }
+  /* Smooth chart transitions */
+  canvas { transition: opacity .2s; }
+</style>
+</head>
+
+<body class="h-full bg-forest-950 text-green-100 font-body flex flex-col overflow-hidden">
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     TOP NAV BAR
+     ══════════════════════════════════════════════════════════════════════ -->
+<nav class="flex items-center gap-0 bg-forest-900 border-b border-forest-700 px-5 h-14 shrink-0 z-50">
+
+  <!-- Brand -->
+  <div class="flex items-center gap-2.5 mr-6">
+    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-400 to-red-500 flex items-center justify-center text-base shadow-lg shadow-orange-900/40">🌲</div>
+    <div>
+      <span class="font-display font-700 text-base text-green-100 tracking-tight">VanSuraksha</span>
+      <span class="hidden sm:inline text-xs text-green-700 ml-2">Uttarakhand Fire Risk</span>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <button id="tab-map"     onclick="switchTab('map')"     class="tab-active tab-btn h-14 px-4 text-sm font-medium text-green-600 border-b-2 border-transparent transition-colors duration-150">🗺️ Live Map</button>
+  <button id="tab-history" onclick="switchTab('history')" class="tab-btn h-14 px-4 text-sm font-medium text-green-700 border-b-2 border-transparent hover:text-green-500 transition-colors duration-150">📊 Historical</button>
+  <button id="tab-models"  onclick="switchTab('models')"  class="tab-btn h-14 px-4 text-sm font-medium text-green-700 border-b-2 border-transparent hover:text-green-500 transition-colors duration-150">🤖 Models</button>
+
+  <!-- Status pill -->
+  <div class="ml-auto flex items-center gap-2 bg-forest-800 border border-forest-600 rounded-full px-3 py-1.5">
+    <div id="status-dot" class="w-2 h-2 rounded-full bg-forest-600"></div>
+    <span id="status-text" class="text-xs text-green-700">Connecting…</span>
+  </div>
+</nav>
+
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     VIEW — LIVE MAP
+     ══════════════════════════════════════════════════════════════════════ -->
+<div id="view-map" class="flex flex-1 overflow-hidden">
+
+  <!-- ── Sidebar ───────────────────────────────────────────────────────── -->
+  <aside class="w-80 bg-forest-900 border-r border-forest-700 flex flex-col overflow-y-auto shrink-0">
+
+    <!-- Instruction panel (shown before first prediction) -->
+    <div id="panel-intro" class="p-4 border-b border-forest-700">
+      <p class="text-xs font-semibold text-green-700 uppercase tracking-widest mb-3">How to use</p>
+      <div class="space-y-2.5">
+        <div class="flex items-center gap-3 text-xs text-green-600">
+          <div class="w-7 h-7 rounded-md bg-forest-800 border border-forest-600 flex items-center justify-center text-sm shrink-0">🖱️</div>
+          Click anywhere inside the green boundary to predict fire risk
+        </div>
+        <div class="flex items-center gap-3 text-xs text-green-600">
+          <div class="w-7 h-7 rounded-md bg-forest-800 border border-forest-600 flex items-center justify-center text-sm shrink-0">📈</div>
+          See live weather conditions + 7-day forecast
+        </div>
+        <div class="flex items-center gap-3 text-xs text-green-600">
+          <div class="w-7 h-7 rounded-md bg-forest-800 border border-forest-600 flex items-center justify-center text-sm shrink-0">🔴</div>
+          Toggle historical fire hotspots layer
+        </div>
+      </div>
+    </div>
+
+    <!-- Risk Assessment (shown after prediction) -->
+    <div id="panel-risk" class="hidden p-4 border-b border-forest-700">
+      <p class="text-xs font-semibold text-green-700 uppercase tracking-widest mb-3">Risk Assessment</p>
+
+      <!-- Risk gauge + label -->
+      <div class="flex items-center gap-3 mb-3">
+        <!-- SVG gauge -->
+        <div class="relative w-16 h-16 shrink-0">
+          <svg viewBox="0 0 60 60" class="w-full h-full -rotate-90">
+            <circle cx="30" cy="30" r="24" fill="none" stroke="#163320" stroke-width="6"/>
+            <circle id="gauge-circle" cx="30" cy="30" r="24" fill="none"
+                    stroke="#22c55e" stroke-width="6" stroke-linecap="round"
+                    stroke-dasharray="150.8" stroke-dashoffset="150.8"
+                    class="gauge-fill"/>
+          </svg>
+          <div class="absolute inset-0 flex items-center justify-center">
+            <span id="gauge-pct" class="text-xs font-display font-700 text-green-300">0%</span>
+          </div>
+        </div>
+        <div class="min-w-0">
+          <div id="risk-level-text" class="font-display font-700 text-lg text-green-400 leading-tight">—</div>
+          <div id="risk-coords"     class="text-xs text-green-700 mt-0.5 truncate">Click map to predict</div>
+          <div id="risk-ts"         class="text-xs text-green-800 mt-0.5"></div>
+        </div>
+      </div>
+
+      <!-- Action badge -->
+      <div id="risk-action" class="rounded-lg bg-forest-800 border border-forest-600 p-2.5">
+        <p class="text-xs text-green-800 font-semibold uppercase tracking-wider mb-1">Recommended Action</p>
+        <p id="risk-action-text" class="text-xs text-green-500 leading-relaxed">—</p>
+      </div>
+    </div>
+
+    <!-- Weather snapshot (shown after prediction) -->
+    <div id="panel-weather" class="hidden p-4 border-b border-forest-700">
+      <p class="text-xs font-semibold text-green-700 uppercase tracking-widest mb-3">Live Weather</p>
+      <div class="grid grid-cols-2 gap-2">
+        <div class="bg-forest-800 border border-forest-600 rounded-lg p-2.5">
+          <div class="text-base mb-0.5">🌡️</div>
+          <div id="w-temp"   class="font-display font-700 text-lg text-green-200">—</div>
+          <div class="text-xs text-green-800">Temperature</div>
+        </div>
+        <div class="bg-forest-800 border border-forest-600 rounded-lg p-2.5">
+          <div class="text-base mb-0.5">💧</div>
+          <div id="w-hum"    class="font-display font-700 text-lg text-green-200">—</div>
+          <div class="text-xs text-green-800">Humidity</div>
+        </div>
+        <div class="bg-forest-800 border border-forest-600 rounded-lg p-2.5">
+          <div class="text-base mb-0.5">💨</div>
+          <div id="w-wind"   class="font-display font-700 text-lg text-green-200">—</div>
+          <div class="text-xs text-green-800">Wind km/h</div>
+        </div>
+        <div class="bg-forest-800 border border-forest-600 rounded-lg p-2.5">
+          <div class="text-base mb-0.5">🌧️</div>
+          <div id="w-precip" class="font-display font-700 text-lg text-green-200">—</div>
+          <div class="text-xs text-green-800">Precip mm</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 7-day forecast chart -->
+    <div id="panel-forecast" class="hidden p-4 border-b border-forest-700">
+      <p class="text-xs font-semibold text-green-700 uppercase tracking-widest mb-3">7-Day Forecast</p>
+      <div class="h-28"><canvas id="forecast-chart"></canvas></div>
+    </div>
+
+    <!-- Map layer controls -->
+    <div class="p-4 border-b border-forest-700">
+      <p class="text-xs font-semibold text-green-700 uppercase tracking-widest mb-3">Map Layers</p>
+      <label class="flex items-center justify-between cursor-pointer">
+        <span class="text-xs text-green-600">Historical fire hotspots</span>
+        <div class="relative">
+          <input type="checkbox" id="hotspot-toggle" class="sr-only" onchange="toggleHotspots(this.checked)"/>
+          <div class="toggle-bg w-9 h-5 bg-forest-700 border border-forest-600 rounded-full transition-colors"></div>
+          <div class="toggle-dot absolute left-0.5 top-0.5 w-4 h-4 bg-forest-500 rounded-full transition-transform"></div>
+        </div>
+      </label>
+    </div>
+
+    <!-- Risk legend -->
+    <div class="p-4">
+      <p class="text-xs font-semibold text-green-700 uppercase tracking-widest mb-3">Risk Scale</p>
+      <div class="space-y-1.5">
+        <div class="flex items-center gap-2 text-xs text-green-600"><div class="w-2.5 h-2.5 rounded-full bg-green-500 shrink-0"></div> Minimal  <span class="ml-auto text-green-800">0–20%</span></div>
+        <div class="flex items-center gap-2 text-xs text-green-600"><div class="w-2.5 h-2.5 rounded-full bg-lime-500 shrink-0"></div> Low      <span class="ml-auto text-green-800">20–40%</span></div>
+        <div class="flex items-center gap-2 text-xs text-green-600"><div class="w-2.5 h-2.5 rounded-full bg-amber-500 shrink-0"></div> Moderate <span class="ml-auto text-green-800">40–60%</span></div>
+        <div class="flex items-center gap-2 text-xs text-green-600"><div class="w-2.5 h-2.5 rounded-full bg-red-500 shrink-0"></div> High     <span class="ml-auto text-green-800">60–80%</span></div>
+        <div class="flex items-center gap-2 text-xs text-green-600"><div class="w-2.5 h-2.5 rounded-full bg-red-900 shrink-0"></div> Extreme  <span class="ml-auto text-green-800">80–100%</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── Leaflet Map ──────────────────────────────────────────────────── -->
+  <div id="map" class="flex-1 cursor-crosshair"></div>
+
+  <!-- Coordinates bar -->
+  <div id="coords-bar" class="absolute bottom-3 right-3 z-40 bg-forest-900/90 border border-forest-700 rounded-md px-3 py-1.5 text-xs text-green-800 font-mono pointer-events-none">
+    Move cursor over map
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     VIEW — HISTORICAL DATA
+     ══════════════════════════════════════════════════════════════════════ -->
+<div id="view-history" class="hidden flex-1 overflow-y-auto bg-forest-950">
+
+  <!-- Controls bar -->
+  <div class="sticky top-0 z-20 bg-forest-900 border-b border-forest-700 px-6 py-3 flex items-end gap-4 flex-wrap">
+    <div class="flex flex-col gap-1">
+      <label class="text-xs font-semibold text-green-700 uppercase tracking-widest">Year</label>
+      <select id="sel-year" class="bg-forest-800 text-green-200 border border-forest-600 rounded-lg px-3 py-2 text-sm min-w-[120px] focus:border-green-500 focus:outline-none appearance-none cursor-pointer">
+        <option value="">— select —</option>
+      </select>
+    </div>
+    <div class="flex flex-col gap-1">
+      <label class="text-xs font-semibold text-green-700 uppercase tracking-widest">Month <span class="text-green-800 normal-case font-normal">(optional)</span></label>
+      <select id="sel-month" class="bg-forest-800 text-green-200 border border-forest-600 rounded-lg px-3 py-2 text-sm min-w-[130px] focus:border-green-500 focus:outline-none appearance-none cursor-pointer">
+        <option value="">All months</option>
+      </select>
+    </div>
+    <button id="btn-load" onclick="loadHistoricalData()" disabled
+      class="self-end bg-green-700 hover:bg-green-600 disabled:bg-forest-700 disabled:text-green-800 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-lg px-5 py-2 transition-colors duration-150">
+      Load Data
+    </button>
+    <div id="hist-spinner" class="hidden self-end w-5 h-5 rounded-full border-2 border-forest-600 border-t-green-500 animate-spin"></div>
+  </div>
+
+  <!-- KPI row -->
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 px-6 pt-5 pb-2">
+    <div class="bg-forest-900 border border-forest-700 rounded-xl p-4">
+      <div id="kpi-fires" class="font-display font-800 text-3xl text-green-400">—</div>
+      <div class="text-xs text-green-700 mt-1.5 uppercase tracking-wider">Fire Detections</div>
+    </div>
+    <div class="bg-forest-900 border border-forest-700 rounded-xl p-4">
+      <div id="kpi-avg" class="font-display font-800 text-3xl text-amber-400">—</div>
+      <div class="text-xs text-green-700 mt-1.5 uppercase tracking-wider">Mean FRP (MW)</div>
+    </div>
+    <div class="bg-forest-900 border border-forest-700 rounded-xl p-4">
+      <div id="kpi-max" class="font-display font-800 text-3xl text-red-400">—</div>
+      <div class="text-xs text-green-700 mt-1.5 uppercase tracking-wider">Peak FRP (MW)</div>
+    </div>
+    <div class="bg-forest-900 border border-forest-700 rounded-xl p-4">
+      <div id="kpi-month" class="font-display font-800 text-3xl text-orange-400">—</div>
+      <div class="text-xs text-green-700 mt-1.5 uppercase tracking-wider">Peak Fire Month</div>
+    </div>
+  </div>
+
+  <!-- Charts grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 px-6 py-4">
+
+    <!-- FRP trend -->
+    <div class="bg-forest-900 border border-forest-700 rounded-xl p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h3 id="frp-chart-title" class="font-display font-700 text-sm text-green-200">FRP Over Time</h3>
+        <span id="frp-badge" class="text-xs text-green-700 bg-forest-800 border border-forest-600 rounded-full px-2.5 py-0.5"></span>
+      </div>
+      <div class="relative h-52">
+        <canvas id="hist-frp-chart"></canvas>
+        <div id="frp-empty" class="absolute inset-0 flex flex-col items-center justify-center gap-2 text-green-800 text-sm">
+          <span class="text-3xl">📅</span>Select a year to view FRP trends
+        </div>
+      </div>
+    </div>
+
+    <!-- Season chart -->
+    <div class="bg-forest-900 border border-forest-700 rounded-xl p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-display font-700 text-sm text-green-200">Fire Intensity by Season</h3>
+        <span class="text-xs text-green-800">Median + P75</span>
+      </div>
+      <div class="relative h-52">
+        <canvas id="season-chart"></canvas>
+        <div id="season-empty" class="absolute inset-0 flex flex-col items-center justify-center gap-2 text-green-800 text-sm">
+          <span class="text-3xl">🌿</span>Loading season data…
+        </div>
+      </div>
+    </div>
+
+    <!-- Monthly table — full width -->
+    <div class="lg:col-span-2 bg-forest-900 border border-forest-700 rounded-xl p-5">
+      <h3 id="table-title" class="font-display font-700 text-sm text-green-200 mb-4">Monthly Fire Statistics</h3>
+      <div id="monthly-table-wrap">
+        <div class="flex flex-col items-center justify-center gap-2 text-green-800 text-sm py-10">
+          <span class="text-3xl">📊</span>Select a year to see monthly breakdown
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     VIEW — MODELS
+     ══════════════════════════════════════════════════════════════════════ -->
+<div id="view-models" class="hidden flex-1 overflow-y-auto bg-forest-950 px-6 py-6">
+
+  <h2 class="font-display font-700 text-lg text-green-200 mb-5">Model Performance Comparison</h2>
+
+  <!-- Model cards grid -->
+  <div id="model-cards" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
+    <div class="bg-forest-900 border border-forest-700 rounded-xl p-5 col-span-full text-center text-green-800 text-sm py-10">
+      <span class="text-3xl block mb-2">🤖</span>Run Stage 4 training to see model metrics
+    </div>
+  </div>
+
+  <!-- Bar chart comparing models -->
+  <div class="bg-forest-900 border border-forest-700 rounded-xl p-5 mb-4">
+    <h3 class="font-display font-700 text-sm text-green-200 mb-4">Accuracy Comparison</h3>
+    <div class="h-56"><canvas id="models-chart"></canvas></div>
+  </div>
+
+  <!-- Feature importance -->
+  <div class="bg-forest-900 border border-forest-700 rounded-xl p-5">
+    <h3 class="font-display font-700 text-sm text-green-200 mb-4">Feature Importance (XGBoost)</h3>
+    <div id="feature-importance-wrap">
+      <div class="text-green-800 text-sm text-center py-6">Feature importance loads after training</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ── Toggle CSS (custom Tailwind component) ──────────────────────────────── -->
+<style>
+  input:checked ~ .toggle-bg { background:#166534; border-color:#16a34a; }
+  input:checked ~ .toggle-dot { transform:translateX(16px); background:#4ade80; }
+</style>
+
+<!-- Loading overlay -->
+<div id="loading-overlay" class="hidden fixed inset-0 bg-forest-950/70 backdrop-blur-sm z-[9999] flex flex-col items-center justify-center gap-3">
+  <div class="w-9 h-9 rounded-full border-[3px] border-forest-700 border-t-green-400 animate-spin"></div>
+  <p id="loading-text" class="text-sm text-green-600 font-display">Loading…</p>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 translate-y-24 bg-red-950 border border-red-800 text-red-300 px-4 py-2.5 rounded-lg text-sm z-[99999] transition-transform duration-300 whitespace-nowrap">
+  Error
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     JAVASCRIPT
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+"use strict";
+
+const MONTH_NAMES  = ["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const MONTH_FULL   = ["","January","February","March","April","May","June","July","August","September","October","November","December"];
+
+/* ── Chart.js dark theme defaults ─────────────────────────────────────── */
+Chart.defaults.color       = "#166534";
+Chart.defaults.borderColor = "#163320";
+Chart.defaults.font.family = "'Inter', sans-serif";
+Chart.defaults.font.size   = 11;
+
+/* ══════════════════════════════════════════════════════════════════════
+   TAB SWITCHING
+   ══════════════════════════════════════════════════════════════════════ */
+function switchTab(name) {
+  ["map","history","models"].forEach(t => {
+    const btn  = document.getElementById(`tab-${t}`);
+    const view = document.getElementById(`view-${t}`);
+    const isActive = t === name;
+    btn.classList.toggle("tab-active", isActive);
+    btn.classList.toggle("text-green-500", !isActive);
+    btn.classList.toggle("text-green-700", !isActive);
+    view.classList.toggle("hidden",   !isActive);
+    view.classList.toggle("flex",      isActive && t === "map");
+  });
+  document.getElementById("coords-bar").style.display = name === "map" ? "" : "none";
+  if (name === "map")     setTimeout(() => leafletMap.invalidateSize(), 60);
+  if (name === "history" && !histSeeded) seedHistorySelectors();
+  if (name === "models")  loadModelStats();
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   LEAFLET MAP
+   ══════════════════════════════════════════════════════════════════════ */
+const leafletMap = L.map("map", { center:[30.0,79.0], zoom:8 });
+
+L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  attribution:"© OpenStreetMap © CartoDB", maxZoom:16,
+}).addTo(leafletMap);
+
+/* Uttarakhand study-area boundary */
+L.rectangle([[28.5,77.5],[31.5,81.0]], {
+  color:"#22c55e", weight:1.5, fillColor:"#22c55e",
+  fillOpacity:0.04, dashArray:"5 5",
+}).addTo(leafletMap).bindTooltip("Uttarakhand Study Area", {sticky:true});
+
+let currentMarker = null, hotspotLayer = null, hotspotsLoaded = false;
+let forecastChart = null;
+
+/* Health check on boot */
+async function checkHealth() {
+  try {
+    const d = await fetchJSON("/health");
+    const ready = d.models_ready;
+    document.getElementById("status-dot").className =
+      `w-2 h-2 rounded-full ${ready ? "bg-green-500 shadow-[0_0_6px_#22c55e]" : "bg-red-600"}`;
+    document.getElementById("status-text").textContent =
+      ready ? "Models ready" : "Models not trained";
+  } catch {
+    document.getElementById("status-dot").className = "w-2 h-2 rounded-full bg-red-600";
+    document.getElementById("status-text").textContent = "Server offline";
+  }
+}
+
+/* Map click → predict */
+leafletMap.on("click", e => runPrediction(e.latlng.lat, e.latlng.lng));
+leafletMap.on("mousemove", e => {
+  document.getElementById("coords-bar").textContent =
+    `${e.latlng.lat.toFixed(4)}°N  ${e.latlng.lng.toFixed(4)}°E`;
+});
+
+async function runPrediction(lat, lon) {
+  showLoading("Fetching live weather & prediction…");
+  try {
+    const [pred, forecast] = await Promise.all([
+      postJSON("/predict",  {lat,lon}),
+      postJSON("/forecast", {lat,lon}),
+    ]);
+    if (pred.status !== "success") throw new Error(pred.message || "Prediction failed");
+    updateRiskPanel(pred);
+    updateWeatherPanel(pred.weather_snapshot);
+    placeMarker(lat, lon, pred);
+    updateForecastChart(forecast);
+  } catch(e) { showToast("⚠️ " + e.message); }
+  finally { hideLoading(); }
+}
+
+/* ── Risk Panel ─────────────────────────────────────────────────────── */
+function updateRiskPanel(pred) {
+  const rm  = pred.risk_metrics;
+  const pct = rm.probability_pct;
+
+  /* Show sections */
+  document.getElementById("panel-intro").classList.add("hidden");
+  document.getElementById("panel-risk").classList.remove("hidden");
+
+  /* SVG gauge — circumference 150.8 */
+  const offset = 150.8 - (pct / 100) * 150.8;
+  const circle = document.getElementById("gauge-circle");
+  circle.style.strokeDashoffset = offset;
+  circle.style.stroke           = rm.color;
+
+  document.getElementById("gauge-pct").textContent      = pct + "%";
+  document.getElementById("gauge-pct").style.color      = rm.color;
+  document.getElementById("risk-level-text").textContent = rm.level + " Risk";
+  document.getElementById("risk-level-text").style.color = rm.color;
+  document.getElementById("risk-coords").textContent     =
+    `${pred.location.lat}°N, ${pred.location.lon}°E`;
+  document.getElementById("risk-ts").textContent         = pred.timestamp;
+  document.getElementById("risk-action-text").textContent = rm.action;
+  document.getElementById("risk-action").style.borderColor = rm.color + "44";
+}
+
+/* ── Weather Panel ───────────────────────────────────────────────────── */
+function updateWeatherPanel(ws) {
+  document.getElementById("panel-weather").classList.remove("hidden");
+  document.getElementById("w-temp").textContent   = ws.temperature_c + "°C";
+  document.getElementById("w-hum").textContent    = ws.humidity_pct + "%";
+  document.getElementById("w-wind").textContent   = ws.wind_kmh + " km/h";
+  document.getElementById("w-precip").textContent = ws.precipitation_mm + " mm";
+}
+
+/* ── Forecast chart (Chart.js line) ──────────────────────────────────── */
+function updateForecastChart(data) {
+  document.getElementById("panel-forecast").classList.remove("hidden");
+  if (!data || !data.length) return;
+
+  /* Downsample 168h → every 6th hour for readability */
+  const sampled = data.filter((_, i) => i % 6 === 0);
+  const labels  = sampled.map(d => {
+    const dt = new Date(d.time);
+    return `${dt.getDate()} ${MONTH_NAMES[dt.getMonth()+1]} ${dt.getHours()}h`;
+  });
+  const probs   = sampled.map(d => +(d.prob * 100).toFixed(1));
+  const colors  = sampled.map(d => d.color);
+
+  const ctx = document.getElementById("forecast-chart").getContext("2d");
+  if (forecastChart) forecastChart.destroy();
+  forecastChart = new Chart(ctx, {
+    type:"line",
+    data:{
+      labels,
+      datasets:[
+        { label:"Risk %", data:probs,
+          borderColor:"#f59e0b", borderWidth:2,
+          backgroundColor:"rgba(245,158,11,0.08)",
+          pointBackgroundColor: colors,
+          pointRadius:3, pointHoverRadius:5,
+          tension:0.4, fill:true },
+        { label:"High threshold", data:new Array(labels.length).fill(70),
+          borderColor:"rgba(239,68,68,0.4)", borderWidth:1,
+          borderDash:[4,3], pointRadius:0, fill:false },
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false},
+        tooltip:{ backgroundColor:"#0a1a0e", borderColor:"#1e4429", borderWidth:1, padding:8,
+          callbacks:{ label: ctx => ` Risk: ${ctx.parsed.y}%` } }
+      },
+      scales:{
+        x:{ ticks:{maxTicksLimit:7, maxRotation:0, color:"#166534", font:{size:9}}, grid:{color:"#0f2614"} },
+        y:{ min:0, max:100, ticks:{color:"#166534", font:{size:9}, callback: v=>v+"%"}, grid:{color:"#0f2614"} },
+      },
+    }
+  });
+}
+
+/* ── Map marker ──────────────────────────────────────────────────────── */
+function placeMarker(lat, lon, pred) {
+  if (currentMarker) leafletMap.removeLayer(currentMarker);
+  const rm = pred.risk_metrics;
+  const r  = 7 + rm.probability * 16;
+
+  currentMarker = L.circleMarker([lat,lon], {
+    radius:r, color:rm.color, fillColor:rm.color,
+    fillOpacity:0.3, weight:2,
+  }).addTo(leafletMap);
+
+  currentMarker.bindPopup(`
+    <div style="min-width:170px;font-family:Inter,sans-serif">
+      <div style="font-family:Syne,sans-serif;font-size:15px;font-weight:700;color:${rm.color};margin-bottom:4px">
+        ${riskEmoji(rm.level)} ${rm.level} Risk
+      </div>
+      <div style="font-size:11px;color:#4ade80;opacity:.6;margin-bottom:8px">
+        ${lat.toFixed(4)}°N, ${lon.toFixed(4)}°E
+      </div>
+      <div style="font-size:22px;font-weight:700;font-family:Syne,sans-serif;color:${rm.color}">
+        ${rm.probability_pct}%
+      </div>
+      <div style="font-size:10px;color:#166534;margin-bottom:6px">probability</div>
+      <div style="font-size:11px;color:#4ade80;opacity:.7;line-height:1.4">${rm.action}</div>
+    </div>`).openPopup();
+}
+
+/* ── Hotspot layer ───────────────────────────────────────────────────── */
+async function toggleHotspots(on) {
+  if (!on) { if (hotspotLayer) leafletMap.removeLayer(hotspotLayer); return; }
+  if (hotspotsLoaded && hotspotLayer) { hotspotLayer.addTo(leafletMap); return; }
+
+  showLoading("Loading historical hotspots…");
+  try {
+    const data = await fetchJSON("/hotspots");
+    if (!Array.isArray(data) || !data.length) throw new Error("No hotspot data available");
+    const markers = data.map(d => {
+      const t = Math.min(d.frp / 80, 1);
+      const color = interpolateFireColor(t);
+      return L.circleMarker([d.latitude,d.longitude], {
+        radius: 3 + t*6, color, fillColor:color,
+        fillOpacity: 0.55 + t*0.35, weight:0,
+      }).bindTooltip(`🔥 FRP: ${d.frp} MW · ${d.date}`, {sticky:true});
+    });
+    hotspotLayer = L.layerGroup(markers).addTo(leafletMap);
+    hotspotsLoaded = true;
+    showToast(`✅ Loaded ${data.length} fire hotspots`, "success");
+  } catch(e) {
+    showToast("⚠️ " + e.message);
+    document.getElementById("hotspot-toggle").checked = false;
+  } finally { hideLoading(); }
+}
+
+/** Yellow → orange → red gradient for hotspot intensity */
+function interpolateFireColor(t) {
+  const stops = [[255,255,178],[253,141,60],[189,0,38]];
+  const seg   = t * (stops.length-1);
+  const i     = Math.min(Math.floor(seg), stops.length-2);
+  const f     = seg - i;
+  const [r,g,b] = stops[i].map((v,j) => Math.round(v + (stops[i+1][j]-v)*f));
+  return `rgb(${r},${g},${b})`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   HISTORICAL DATA
+   ══════════════════════════════════════════════════════════════════════ */
+let histSeeded = false, histFrpChart = null, histSeasonChart = null;
+
+async function seedHistorySelectors() {
+  histSeeded = true;
+  try {
+    const meta = await fetchJSON("/api/meta");
+    const sel  = document.getElementById("sel-year");
+    meta.years.forEach(y => sel.add(new Option(y, y)));
+    sel.addEventListener("change", onYearChange);
+    loadSeasonChart();           // Load season chart immediately
+  } catch(e) { showToast("Metadata load failed: " + e.message); }
+}
+
+async function onYearChange() {
+  const year    = document.getElementById("sel-year").value;
+  const monthSel = document.getElementById("sel-month");
+  monthSel.innerHTML = '<option value="">All months</option>';
+  document.getElementById("btn-load").disabled = !year;
+  if (!year) return;
+
+  const meta = await fetchJSON(`/api/meta?year=${year}`);
+  meta.months.forEach(m => monthSel.add(new Option(MONTH_FULL[m], m)));
+}
+
+async function loadHistoricalData() {
+  const year  = document.getElementById("sel-year").value;
+  const month = document.getElementById("sel-month").value || null;
+  if (!year) return;
+
+  setHistLoading(true);
+  try {
+    const [frpData, summary] = await Promise.all([
+      fetchJSON(`/api/frp?year=${year}${month ? "&month="+month : ""}`),
+      fetchJSON(`/api/monthly-summary?year=${year}`),
+    ]);
+    renderKPIs(frpData, summary, month);
+    renderFrpChart(frpData);
+    renderMonthlyTable(summary, year, month);
+  } catch(e) { showToast("Error: " + e.message); }
+  finally { setHistLoading(false); }
+}
+
+function renderKPIs(frpData, summary, month) {
+  document.getElementById("kpi-fires").textContent = (frpData.fire_count ?? 0).toLocaleString();
+  document.getElementById("kpi-avg").textContent   = frpData.avg_frp ?? "—";
+  document.getElementById("kpi-max").textContent   = frpData.max_frp ?? "—";
+  if (!month && summary.length) {
+    const peak = summary.reduce((a,b) => a.fire_count > b.fire_count ? a : b);
+    document.getElementById("kpi-month").textContent = peak.month_name.slice(0,3);
+  } else {
+    document.getElementById("kpi-month").textContent = month ? MONTH_NAMES[+month] : "—";
+  }
+}
+
+function renderFrpChart(data) {
+  document.getElementById("frp-chart-title").textContent = data.title;
+  document.getElementById("frp-badge").textContent =
+    data.values?.length ? `${data.values.length} data points` : "";
+
+  const empty = document.getElementById("frp-empty");
+  if (!data.values?.length) {
+    empty.style.display = "flex";
+    if (histFrpChart) { histFrpChart.destroy(); histFrpChart = null; }
+    return;
+  }
+  empty.style.display = "none";
+
+  const ctx   = document.getElementById("hist-frp-chart").getContext("2d");
+  const isBar = data.chart_type === "bar";
+
+  /* Gradient fill for line chart */
+  let gradient;
+  if (!isBar) {
+    gradient = ctx.createLinearGradient(0, 0, 0, 200);
+    gradient.addColorStop(0,   "rgba(245,158,11,0.4)");
+    gradient.addColorStop(1,   "rgba(245,158,11,0.0)");
+  }
+
+  if (histFrpChart) histFrpChart.destroy();
+  histFrpChart = new Chart(ctx, {
+    type: isBar ? "bar" : "line",
+    data:{
+      labels: data.labels,
+      datasets:[{
+        label:"FRP (MW)",
+        data: data.values,
+        borderColor:"#f59e0b",
+        backgroundColor: isBar
+          ? data.values.map(v => `rgba(245,158,11,${Math.min(0.2+v/200,0.85)})`)
+          : gradient,
+        borderWidth:  isBar ? 1 : 2,
+        pointRadius:  isBar ? 0 : 2.5,
+        pointHoverRadius: 5,
+        tension:      0.4,
+        fill:         !isBar,
+        borderRadius: isBar ? 4 : 0,
+      }]
+    },
+    options: darkChartOpts("FRP (MW)"),
+  });
+}
+
+async function loadSeasonChart() {
+  try {
+    const data    = await fetchJSON("/api/seasons");
+    const seasons = Object.keys(data);
+    if (!seasons.length) return;
+
+    document.getElementById("season-empty").style.display = "none";
+    const palette = ["#22c55e","#f59e0b","#ef4444","#60a5fa"];
+    const medians = seasons.map(s => +median(data[s]).toFixed(2));
+    const p75s    = seasons.map(s => +percentile(data[s], 75).toFixed(2));
+    const counts  = seasons.map(s => data[s].length);
+
+    const ctx = document.getElementById("season-chart").getContext("2d");
+    if (histSeasonChart) histSeasonChart.destroy();
+    histSeasonChart = new Chart(ctx, {
+      type:"bar",
+      data:{
+        labels: seasons,
+        datasets:[
+          { label:"Median FRP",
+            data: medians,
+            backgroundColor: palette.map(c => c+"44"),
+            borderColor:     palette,
+            borderWidth:2, borderRadius:6 },
+          { type:"line", label:"75th Percentile",
+            data: p75s,
+            borderColor:"rgba(255,255,255,0.15)",
+            borderWidth:1.5, borderDash:[4,3],
+            pointBackgroundColor: palette,
+            pointRadius:5, fill:false },
+        ]
+      },
+      options:{
+        ...darkChartOpts("FRP (MW)"),
+        plugins:{
+          ...darkChartOpts("FRP (MW)").plugins,
+          tooltip:{
+            backgroundColor:"#0a1a0e", borderColor:"#1e4429", borderWidth:1, padding:8,
+            callbacks:{
+              afterLabel: (ctx) => {
+                const s = seasons[ctx.dataIndex];
+                return `Count: ${counts[ctx.dataIndex].toLocaleString()}`;
+              }
+            }
+          }
+        }
+      }
+    });
+  } catch(e) { console.warn("Season chart:", e.message); }
+}
+
+function renderMonthlyTable(summary, year, month) {
+  document.getElementById("table-title").textContent = month
+    ? `Fire Statistics — ${MONTH_FULL[+month]} ${year}`
+    : `Monthly Fire Statistics — ${year}`;
+
+  const wrap = document.getElementById("monthly-table-wrap");
+  if (!summary.length) {
+    wrap.innerHTML = `<div class="flex flex-col items-center justify-center gap-2 text-green-800 text-sm py-10"><span class="text-3xl">📭</span>No data for this period</div>`;
+    return;
+  }
+
+  const maxFires = Math.max(...summary.map(r => r.fire_count));
+  const rows = summary.map(r => {
+    const isPeak = r.fire_count === maxFires;
+    const pct    = Math.round((r.fire_count / maxFires) * 100);
+    return `<tr class="border-t border-forest-800 hover:bg-forest-800/40 transition-colors">
+      <td class="py-2.5 px-3 text-sm text-green-400 font-medium">${r.month_name}</td>
+      <td class="py-2.5 px-3">
+        <div class="flex items-center gap-2">
+          <span class="text-sm ${isPeak ? "text-amber-400 font-700" : "text-green-300"}">${r.fire_count.toLocaleString()}</span>
+          <div class="h-1.5 rounded-full bg-forest-700 flex-1 max-w-[80px]">
+            <div class="h-full rounded-full ${isPeak ? "bg-amber-500" : "bg-green-700"}" style="width:${pct}%"></div>
+          </div>
+          ${isPeak ? '<span class="text-xs text-amber-500">Peak</span>' : ""}
+        </div>
+      </td>
+      <td class="py-2.5 px-3 text-sm text-green-500 text-right">${r.mean_frp.toFixed(1)}</td>
+      <td class="py-2.5 px-3 text-sm ${r.max_frp > 200 ? "text-red-400" : "text-green-500"} text-right">${r.max_frp.toFixed(1)}</td>
+    </tr>`;
+  }).join("");
+
+  wrap.innerHTML = `
+    <table class="w-full">
+      <thead>
+        <tr>
+          <th class="pb-2 px-3 text-left text-xs font-semibold text-green-800 uppercase tracking-wider">Month</th>
+          <th class="pb-2 px-3 text-left text-xs font-semibold text-green-800 uppercase tracking-wider">Detections</th>
+          <th class="pb-2 px-3 text-right text-xs font-semibold text-green-800 uppercase tracking-wider">Mean FRP</th>
+          <th class="pb-2 px-3 text-right text-xs font-semibold text-green-800 uppercase tracking-wider">Peak FRP</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   MODEL STATS VIEW
+   ══════════════════════════════════════════════════════════════════════ */
+let modelsLoaded = false, modelsChart = null;
+
+async function loadModelStats() {
+  if (modelsLoaded) return;
+  modelsLoaded = true;
+  try {
+    const stats = await fetchJSON("/model-stats");
+    if (!stats.length) return;
+
+    /* Model metric cards */
+    const metricOrder = ["Accuracy","F1 Score","ROC-AUC","Precision","Recall"];
+    const modelColors = ["#22c55e","#f59e0b","#60a5fa","#c084fc"];
+    const cards = stats.map((m,i) => `
+      <div class="bg-forest-800 border border-forest-600 rounded-xl p-4" style="border-top:3px solid ${modelColors[i]}">
+        <div class="font-display font-700 text-sm text-green-200 mb-3">${m.Model}</div>
+        ${metricOrder.map(k => m[k] !== undefined ? `
+          <div class="flex justify-between items-center mb-1.5">
+            <span class="text-xs text-green-800">${k}</span>
+            <div class="flex items-center gap-2">
+              <div class="w-16 h-1 bg-forest-700 rounded-full overflow-hidden">
+                <div class="h-full rounded-full" style="width:${(m[k]*100).toFixed(0)}%;background:${modelColors[i]}"></div>
+              </div>
+              <span class="text-xs font-600 text-green-300 w-10 text-right">${(m[k]*100).toFixed(1)}%</span>
+            </div>
+          </div>` : "").join("")}
+      </div>`).join("");
+    document.getElementById("model-cards").innerHTML = cards;
+
+    /* Bar chart */
+    const ctx = document.getElementById("models-chart").getContext("2d");
+    if (modelsChart) modelsChart.destroy();
+    modelsChart = new Chart(ctx, {
+      type:"bar",
+      data:{
+        labels: stats.map(s => s.Model),
+        datasets:[
+          { label:"Accuracy",  data:stats.map(s=>(s.Accuracy*100).toFixed(1)),  backgroundColor:"#22c55e55", borderColor:"#22c55e", borderWidth:2, borderRadius:4 },
+          { label:"F1 Score",  data:stats.map(s=>(s["F1 Score"]*100).toFixed(1)), backgroundColor:"#f59e0b55", borderColor:"#f59e0b", borderWidth:2, borderRadius:4 },
+          { label:"ROC-AUC",   data:stats.map(s=>(s["ROC-AUC"]*100).toFixed(1)),  backgroundColor:"#60a5fa55", borderColor:"#60a5fa", borderWidth:2, borderRadius:4 },
+        ]
+      },
+      options:{ ...darkChartOpts("%"), plugins:{ ...darkChartOpts("%").plugins, legend:{ display:true, position:"bottom", labels:{ color:"#166534", boxWidth:10, padding:14 } } } }
+    });
+
+    /* Feature importance bars */
+    await loadFeatureImportance();
+  } catch(e) { console.warn("Model stats:", e.message); }
+}
+
+async function loadFeatureImportance() {
+  try {
+    const resp = await fetch("/static/feature_importance.json");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderFeatureImportance(data);
+  } catch { /* non-critical */ }
+}
+
+function renderFeatureImportance(data) {
+  if (!data?.length) return;
+  const max   = Math.max(...data.map(d => d.importance));
+  const bars  = data.slice(0,10).map((d,i) => {
+    const pct = ((d.importance / max) * 100).toFixed(1);
+    const hue = Math.round(120 - (i/10)*120);
+    return `<div class="flex items-center gap-2 mb-2">
+      <span class="text-xs text-green-700 w-32 shrink-0 truncate">${d.feature}</span>
+      <div class="h-4 rounded flex-1 bg-forest-800 overflow-hidden">
+        <div class="h-full rounded" style="width:${pct}%;background:hsl(${hue},60%,45%)"></div>
+      </div>
+      <span class="text-xs text-green-600 w-10 text-right">${(d.importance*100).toFixed(1)}%</span>
+    </div>`;
+  }).join("");
+  document.getElementById("feature-importance-wrap").innerHTML = bars;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   SHARED HELPERS
+   ══════════════════════════════════════════════════════════════════════ */
+function darkChartOpts(yLabel) {
+  return {
+    responsive:true, maintainAspectRatio:false,
+    interaction:{ mode:"index", intersect:false },
+    plugins:{
+      legend:{ display:false },
+      tooltip:{ backgroundColor:"#0a1a0e", borderColor:"#1e4429", borderWidth:1, padding:8 },
+    },
+    scales:{
+      x:{ ticks:{ color:"#166534", maxRotation:30, maxTicksLimit:12 }, grid:{ color:"#0f2614" } },
+      y:{ title:{ display:true, text:yLabel, color:"#166534" },
+          ticks:{ color:"#166534" }, grid:{ color:"#0f2614" } },
+    },
+  };
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body),
+  });
+  return r.json();
+}
+
+function setHistLoading(on) {
+  document.getElementById("hist-spinner").classList.toggle("hidden",  !on);
+  document.getElementById("btn-load").disabled = on;
+}
+
+function riskEmoji(level) {
+  return {Minimal:"🟢",Low:"🟡",Moderate:"🟠",High:"🔴",Extreme:"🔥"}[level]||"⚪";
+}
+
+function showLoading(msg) {
+  document.getElementById("loading-text").textContent = msg;
+  document.getElementById("loading-overlay").classList.remove("hidden");
+}
+function hideLoading() { document.getElementById("loading-overlay").classList.add("hidden"); }
+
+let _toastTimer;
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.style.transform = "translateX(-50%) translateY(0)";
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { t.style.transform = "translateX(-50%) translateY(96px)"; }, 4000);
+}
+
+function median(arr) {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a,b)=>a-b), m = Math.floor(s.length/2);
+  return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
+}
+function percentile(arr, p) {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a,b)=>a-b);
+  return s[Math.max(0, Math.ceil((p/100)*s.length)-1)];
+}
+
+/* ── Boot ──────────────────────────────────────────────────────────── */
+checkHealth();
+</script>
+</body>
+</html>
